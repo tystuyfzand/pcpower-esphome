@@ -1,0 +1,2 @@
+# udev file for GL.iNet Comet devices that maps our Wemos D1 Mini boards into the ttyACM0 path, along with configuring stty for the serial chip
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="ttyACM0", RUN+="/bin/stty -F /dev/%k 38400 cs8 -cstopb -parenb -echo clocal -hupcl ignpar ignbrk"
