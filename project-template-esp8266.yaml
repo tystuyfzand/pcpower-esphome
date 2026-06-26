@@ -1,0 +1,204 @@
+# Board: Wemos D1 Mini (ESP8266) (Wemos)
+# Definition: definitions/boards/d1_mini/manifest.yaml
+
+substitutions:
+  name: "pcpower-template"
+  friendly_name: "PCPower Template"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  name_add_mac_suffix: true
+
+  project:
+    name: esphome.pcpower-template
+    version: "1.0"
+
+esp8266:
+  board: d1_mini
+
+logger:
+  baud_rate: 0
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ap:
+    password: "12345678"
+
+dashboard_import:
+  package_import_url: github://tystuyfzand/pcpower-esphome/project-template-esp8266.yaml
+  import_full_config: true
+
+captive_portal:
+
+script:
+  - id: cycle_relay
+    parameters:
+      ms: int
+    mode: restart
+    then:
+      - switch.turn_on: relay_2
+      - delay: !lambda 'return ms;'
+      - switch.turn_off: relay_2
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0
+      mode: INPUT
+      inverted: true
+    name: "Power LED Input"
+    id: power_led_input
+    on_press:
+      - light.turn_on: power_led
+    on_release:
+      - light.turn_off: power_led
+
+light:
+  - platform: binary
+    output: led_output
+    name: "Power LED"
+    id: power_led
+
+output:
+  - platform: gpio
+    pin: GPIO14
+    id: led_output
+
+button:
+  - platform: template
+    name: "Power Button"
+    icon: "mdi:power"
+    on_press:
+      - script.execute:
+          id: cycle_relay
+          ms: 1000
+
+  - platform: template
+    name: "Force Power Off"
+    icon: "mdi:power-cycle"
+    on_press:
+      - script.execute:
+          id: cycle_relay
+          ms: 6500
+
+  - platform: template
+    name: "Reset Button"
+    icon: "mdi:power-cycle"
+    on_press:
+      - switch.turn_on: relay_4
+      - delay: 1s
+      - switch.turn_off: relay_4
+          
+# Component Configurations
+switch:
+  # Relay 2 (GPIO13) - the main power optocoupler.
+  - platform: gpio
+    pin: GPIO13
+    name: "Power"
+    id: relay_2
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+  # Relay 3 (GPIO12) - this is physically mapped into the same optocoupler as relay_2 for convenience
+  # Because of this, relay_3 is actually unused, but supported as a basic switch which emulates a hard power off.
+  - platform: gpio
+    pin: GPIO12
+    name: "Hold Power"
+    id: relay_3
+    restore_mode: ALWAYS_OFF
+    internal: true
+    on_turn_on:
+      - delay: 10s
+      - switch.turn_off: relay_2
+    
+
+  # Relay 4 (GPIO15), controls reset
+  - platform: gpio
+    pin: GPIO15
+    name: "Reset"
+    id: relay_4
+    restore_mode: ALWAYS_OFF
+    internal: true
+    on_turn_on:
+      - delay: 1s
+      - switch.turn_off: relay_4
+
+# GL.iNet Comet KVM support, takes over the serial connection to allow incoming commands
+uart:
+  - id: uart_bus
+    tx_pin: GPIO1
+    rx_pin: GPIO3
+    baud_rate: 38400
+    debug:
+      direction: RX
+      dummy_receiver: true
+      after:
+        delimiter: "\n"
+      sequence:
+        - lambda: |-
+            // Convert the incoming bytes into a clean string
+            std::string cmd(bytes.begin(), bytes.end());
+            // Strip out newline and carriage return characters
+            cmd.erase(std::remove(cmd.begin(), cmd.end(), '\n'), cmd.end());
+            cmd.erase(std::remove(cmd.begin(), cmd.end(), '\r'), cmd.end());
+
+            if (cmd.empty()) {
+              return;
+            }
+
+            // Only log commands that aren't GET_POWER_STATE, this is executed every second
+            if (cmd != "GET_POWER_STATE") {
+              ESP_LOGI("serial_cmd", "Received command: %s", cmd.c_str());
+            }
+
+            if (cmd == "GET_SN") {
+              id(uart_bus).write_str("RCV: GET_SN\n");
+              
+              char serial_buf[16];
+              sprintf(serial_buf, "%08X\n", ESP.getChipId());
+              id(uart_bus).write_str(serial_buf);
+            }
+            else if (cmd == "GET_POWER_STATE") {
+              id(uart_bus).write_str("RCV: GET_POWER_STATE\n");
+            
+              if (id(power_led_input).state) {
+                id(uart_bus).write_str("1\n");
+                //ESP_LOGI("serial_out", "Sent state: 1 (On)");
+              } else {
+                id(uart_bus).write_str("0\n");
+                //ESP_LOGI("serial_out", "Sent state: 0 (Off)");
+              }
+            }
+            else if (cmd == "POWER_SW") {
+              id(uart_bus).write_str("RCV: POWER_SW\n");
+              id(cycle_relay).execute(1000);
+            } 
+            else if (cmd == "POWER_RESET") {
+              id(uart_bus).write_str("RCV: POWER_RESET\n");
+              id(relay_4).turn_on();
+            }
+            else if (cmd.rfind("POWER_SW_FORCE", 0) == 0) {
+              id(uart_bus).write_str("RCV: POWER_SW_FORCE\n");
+              
+              std::string argument = cmd.substr(15); 
+              
+              if (!argument.empty() && std::all_of(argument.begin(), argument.end(), ::isdigit)) {
+                int ms_delay = std::strtol(argument.c_str(), nullptr, 10);
+                
+                if (ms_delay > 0) {
+                  ESP_LOGI("serial_cmd", "Executing script with custom delay: %d ms", ms_delay);
+                  
+                  id(cycle_relay).execute(ms_delay);
+                }
+              } else {
+                ESP_LOGW("serial_cmd", "Invalid millisecond payload received! (Must be digits only)");
+              }
+            }
+            else {
+              ESP_LOGW("serial_cmd", "Unknown command!");
+            }
